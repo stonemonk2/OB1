@@ -53,6 +53,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
+- "status": one of "open", "complete", "someday" - only set if type is "task", otherwise omit
 Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
@@ -113,16 +114,19 @@ server.registerTool(
       const results = data.map(
         (
           t: {
+            id: string;
             content: string;
             metadata: Record<string, unknown>;
             similarity: number;
             created_at: string;
           },
+
           i: number
         ) => {
           const m = t.metadata || {};
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+            `ID: ${t.id}`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type || "unknown"}`,
           ];
@@ -167,13 +171,15 @@ server.registerTool(
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
+      date_from: z.string().optional().describe("Start date filter YYYY-MM-DD"),
+      date_to: z.string().optional().describe("End date filter YYYY-MM-DD"),
     },
   },
-  async ({ limit, type, topic, person, days }) => {
+  async ({ limit, type, topic, person, days, date_from, date_to }) => {
     try {
       let q = supabase
         .from("thoughts")
-        .select("content, metadata, created_at")
+        .select("id, content, metadata, created_at")
         .order("created_at", { ascending: false })
         .limit(limit);
 
@@ -185,6 +191,8 @@ server.registerTool(
         since.setDate(since.getDate() - days);
         q = q.gte("created_at", since.toISOString());
       }
+      if (date_from) q = q.gte("created_at", new Date(date_from).toISOString());
+      if (date_to) q = q.lte("created_at", new Date(date_to + "T23:59:59").toISOString());
 
       const { data, error } = await q;
 
@@ -201,12 +209,12 @@ server.registerTool(
 
       const results = data.map(
         (
-          t: { content: string; metadata: Record<string, unknown>; created_at: string },
+          t: { id: string; content: string; metadata: Record<string, unknown>; created_at: string },
           i: number
         ) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ID: ${t.id}\n   ${t.content}`;
         }
       );
 
@@ -353,6 +361,100 @@ server.registerTool(
       return {
         content: [{ type: "text" as const, text: confirmation }],
       };
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+// Tool 5: Update Thought
+server.registerTool(
+  "update_thought",
+  {
+    title: "Update Thought",
+    description: "Update an existing thought by ID. Use this to fix content, correct type, or retag a thought. All fields except thought_id are optional.",
+    inputSchema: {
+      thought_id: z.string().describe("UUID of the thought to update"),
+      content: z.string().optional().describe("New content to replace existing content"),
+      type: z.string().optional().describe("New type: observation, task, idea, reference, person_note"),
+      topic: z.string().optional().describe("New topic tag"),
+    },
+  },
+    async ({ thought_id, content, type, topic }) => {
+    try {
+      // First fetch current metadata
+      const { data: existing, error: fetchError } = await supabase
+        .from("thoughts")
+        .select("metadata")
+        .eq("id", thought_id)
+        .single();
+
+      if (fetchError) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to fetch thought: ${fetchError.message}` }],
+          isError: true,
+        };
+      }
+
+      const currentMeta = (existing?.metadata || {}) as Record<string, unknown>;
+      const updates: Record<string, unknown> = {};
+
+      if (content !== undefined) updates.content = content;
+      if (type !== undefined || topic !== undefined) {
+        updates.metadata = {
+          ...currentMeta,
+          ...(type !== undefined ? { type } : {}),
+          ...(topic !== undefined ? { topics: [topic] } : {}),
+        };
+      }
+
+      const { error } = await supabase
+        .from("thoughts")
+        .update(updates)
+        .eq("id", thought_id);
+
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to update: ${error.message}` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text" as const, text: `Thought ${thought_id} updated successfully.` }] };
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 6: Delete Thought
+server.registerTool(
+  "delete_thought",
+  {
+    title: "Delete Thought",
+    description: "Permanently delete a thought by ID. Use for removing duplicates or incorrect entries.",
+    inputSchema: {
+      thought_id: z.string().describe("UUID of the thought to delete"),
+    },
+  },
+  async ({ thought_id }) => {
+    try {
+      const { error } = await supabase
+        .from("thoughts")
+        .delete()
+        .eq("id", thought_id);
+
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to delete: ${error.message}` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text" as const, text: `Thought ${thought_id} deleted successfully.` }] };
     } catch (err: unknown) {
       return {
         content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
