@@ -54,6 +54,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
 - "status": one of "open", "complete", "someday" - only set if type is "task", otherwise omit
+- "category": one of "professional", "real-estate", "websites", "fitness", "gardening", "nonprofit", "personal" - pick the single best fit
 Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
@@ -72,7 +73,7 @@ Only extract what's explicitly there.`,
 
 const server = new McpServer({
   name: "open-brain",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 // Tool 1: Semantic Search
@@ -169,13 +170,14 @@ server.registerTool(
       limit: z.number().optional().default(10),
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
+      category: z.string().optional().describe("Filter by category: professional, real-estate, websites, fitness, gardening, nonprofit, personal"),
       person: z.string().optional().describe("Filter by person mentioned"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
       date_from: z.string().optional().describe("Start date filter YYYY-MM-DD"),
       date_to: z.string().optional().describe("End date filter YYYY-MM-DD"),
     },
   },
-  async ({ limit, type, topic, person, days, date_from, date_to }) => {
+  async ({ limit, type, topic, person, days, date_from, date_to, category }) => {  
     try {
       let q = supabase
         .from("thoughts")
@@ -185,6 +187,7 @@ server.registerTool(
 
       if (type) q = q.contains("metadata", { type });
       if (topic) q = q.contains("metadata", { topics: [topic] });
+      if (category) q = q.contains("metadata", { category });
       if (person) q = q.contains("metadata", { people: [person] });
       if (days) {
         const since = new Date();
@@ -257,10 +260,15 @@ server.registerTool(
       const types: Record<string, number> = {};
       const topics: Record<string, number> = {};
       const people: Record<string, number> = {};
+      const statuses: Record<string, number> = {};
+      const categories: Record<string, number> = {};
 
       for (const r of data || []) {
         const m = (r.metadata || {}) as Record<string, unknown>;
         if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
+        if (m.status) statuses[m.status as string] = (statuses[m.status as string] || 0) + 1;
+        if (m.category) categories[m.category as string] = (categories[m.category as string] || 0) + 1;
+
         if (Array.isArray(m.topics))
           for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
         if (Array.isArray(m.people))
@@ -285,6 +293,16 @@ server.registerTool(
         "Types:",
         ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
       ];
+
+      if (Object.keys(statuses).length) {
+        lines.push("", "Task statuses:");
+        for (const [k, v] of sort(statuses)) lines.push(`  ${k}: ${v}`);
+      }
+
+      if (Object.keys(categories).length) {
+        lines.push("", "Categories:");
+        for (const [k, v] of sort(categories)) lines.push(`  ${k}: ${v}`);
+      }
 
       if (Object.keys(topics).length) {
         lines.push("", "Top topics:");
